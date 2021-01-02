@@ -1,0 +1,275 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-deployment
+  namespace: monitoring
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      name: prometheus
+      labels:
+        app: prometheus
+    spec:
+      serviceAccount: prometheus
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v1.5.2
+        args:
+        - '-storage.local.retention=360h'
+        - '-storage.local.memory-chunks=1048576'
+        - '-config.file=/etc/prometheus/prometheus.yml'
+        - '-alertmanager.url=http://alertmanager:9093'
+        ports:
+        - name: web
+          containerPort: 9090
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/prometheus
+        - name: alertrules-volume
+          mountPath: /etc/prometheus-rules
+        resources:
+          # keep request = limit to keep this container in guaranteed class
+          limits:
+            memory: 250Mi
+          requests:
+            cpu: 100m
+            memory: 250Mi
+      volumes:
+      - name: config-volume
+        configMap:
+          name: prometheus-configmap
+      - name: alertrules-volume
+        configMap:
+          name: prometheus-alertrules
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app: prometheus
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+  labels:
+    app: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  name: prometheus
+  labels:
+    app: prometheus
+rules:
+- apiGroups: [""] # "" indicates the core API group
+  resources:
+  - nodes
+  - nodes/proxy
+  - services
+  - endpoints
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+---
+# Useful examples on how to configure Prometheus
+# * https://www.weave.works/prometheus-and-kubernetes-monitoring-your-applications/
+# * https://grafana.net/dashboards/162
+# * https://raw.githubusercontent.com/prometheus/prometheus/master/documentation/examples/prometheus-kubernetes.yml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-configmap
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    rule_files:
+      - "/etc/prometheus-rules/alert.rules"
+    scrape_configs:
+      - job_name: kubernetes-service-endpoints
+        kubernetes_sd_configs:
+          - role: endpoints
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+          - source_labels:
+              - __meta_kubernetes_service_label_component
+            regex: apiserver
+            action: replace
+            target_label: __scheme__
+            replacement: https
+          - source_labels:
+              - __meta_kubernetes_service_label_kubernetes_io_cluster_service
+            action: drop
+            regex: 'true'
+          - source_labels:
+              - __meta_kubernetes_service_annotation_prometheus_io_scrape
+            action: drop
+            regex: 'false'
+          - source_labels:
+              - __meta_kubernetes_pod_container_port_name
+            action: drop
+            regex: .*-noscrape
+          - source_labels:
+              - __meta_kubernetes_service_annotation_prometheus_io_scheme
+            action: replace
+            target_label: __scheme__
+            regex: ^(https?)$
+            replacement: $1
+          - source_labels:
+              - __meta_kubernetes_service_annotation_prometheus_io_path
+            action: replace
+            target_label: __metrics_path__
+            regex: ^(.+)$
+            replacement: $1
+          - source_labels:
+              - __address__
+              - __meta_kubernetes_service_annotation_prometheus_io_port
+            action: replace
+            target_label: __address__
+            regex: '^(.+)(?::\d+);(\d+)$'
+            replacement: '$1:$2'
+          - action: labelmap
+            regex: ^__meta_kubernetes_service_label_(.+)$
+            replacement: $1
+          - source_labels:
+              - __meta_kubernetes_namespace
+              - __meta_kubernetes_service_name
+            separator: /
+            target_label: job
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels:
+              - __meta_kubernetes_pod_annotation_prometheus_io_scrape
+            action: keep
+            regex: 'true'
+          - source_labels:
+              - __meta_kubernetes_namespace
+              - __meta_kubernetes_pod_label_name
+            separator: /
+            target_label: job
+          - source_labels:
+              - __meta_kubernetes_pod_node_name
+            target_label: node
+      - job_name: kubernetes-nodes
+        kubernetes_sd_configs:
+          - role: node
+        tls_config:
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+          - target_label: __scheme__
+            replacement: https
+          - source_labels:
+              - __meta_kubernetes_node_label_kubernetes_io_hostname
+            target_label: instance
+      - job_name: weave
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels:
+              - __meta_kubernetes_namespace
+              - __meta_kubernetes_pod_label_name
+            action: keep
+            regex: ^kube-system;weave-net$
+          - source_labels:
+              - __meta_kubernetes_pod_container_name
+              - __address__
+            action: replace
+            target_label: __address__
+            regex: '^weave;(.+?)(?::\d+)?$'
+            replacement: '$1:6782'
+          - source_labels:
+              - __meta_kubernetes_pod_container_name
+              - __address__
+            action: replace
+            target_label: __address__
+            regex: '^weave-npc;(.+?)(?::\d+)?$'
+            replacement: '$1:6781'
+          - source_labels:
+              - __meta_kubernetes_pod_container_name
+            action: replace
+            target_label: job
+---
+# Useful examples on how to configure Prometheus
+# * https://www.weave.works/prometheus-and-kubernetes-monitoring-your-applications/
+# * https://grafana.net/dashboards/162
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-alertrules
+  namespace: monitoring
+data:
+  alert.rules: |
+    # Alert for high error rate in the Sock Shop.
+
+    ALERT HighErrorRate
+      IF rate(request_duration_seconds_count{status_code="500"}[5m]) > 1
+      FOR 5m
+      LABELS { severity = "slack" }
+      ANNOTATIONS {
+        summary = "High HTTP 500 error rates",
+        description = "Rate of HTTP 500 errors per 5 minutes: {{ $value }}",
+      }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    prometheus.io/scrape: 'true'
+  labels:
+    name: prometheus
+  name: prometheus
+  namespace: monitoring
+spec:
+  selector:
+    app: prometheus
+  ports:
+  - name: prometheus
+    protocol: TCP
+    port: 9090
+    targetPort: 9090
+---
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: prometheus
+  labels:
+    name: prometheus
+  namespace: monitoring
+spec:
+  rules:
+  - host: prometheus.local
+    http:
+      paths:
+      - path: /
+        backend:
+          serviceName: prometheus
+          servicePort: 9090
