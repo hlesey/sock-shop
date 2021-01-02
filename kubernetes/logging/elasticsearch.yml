@@ -27,12 +27,20 @@ spec:
         env:
         - name: ES_JAVA_OPTS
           value: "-Xms512m -Xmx512m"
+        - name: discovery.type
+          value: single-node
         resources:
           limits:
             memory: 1024Mi
           requests:
-            cpu: 200m
+            cpu: 100m
             memory: 1024Mi
+        volumeMounts:
+          - name: elasticsearch
+            mountPath: /usr/share/elasticsearch/data
+      volumes:
+        - name: elasticsearch
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
